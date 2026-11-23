@@ -47,8 +47,8 @@ int main(void)
     /* Paired icon halves: two cells, middle gap column blank, halves exact. */
     memset(guarded.frame, 0, sizeof(guarded.frame));
     assert(tg_canvas_line(guarded.frame, 0, "\x80\x81"));
-    const uint8_t wifi_left[5]  = {0x04, 0x0A, 0x11, 0x01, 0x62};
-    const uint8_t wifi_right[5] = {0x62, 0x01, 0x11, 0x0A, 0x04};
+    const uint8_t wifi_left[5]  = {0x00, 0x02, 0x09, 0x15, 0x55};
+    const uint8_t wifi_right[5] = {0x55, 0x15, 0x09, 0x02, 0x00};
     assert(memcmp(guarded.frame, wifi_left, 5) == 0);
     assert(guarded.frame[5] == 0); /* character gap column between the halves */
     assert(memcmp(guarded.frame + 6, wifi_right, 5) == 0);

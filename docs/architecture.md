@@ -21,18 +21,17 @@ src/
   drivers/                 C 适配层：tg_* 的薄封装与所有权守卫
     lease.rs               单所有者 Lease + C 错误码映射
     board/                 板载外设：button/rgb/display/sdcard/power
-    radio/                 射频协议：ble/ble_ad/zigbee/zigbee_check
+    radio/                 射频协议：ble/ble_ad/zigbee/zigbee_event
     net/                   Wi-Fi
     sys/                   芯片服务：system/temperature
   gateway/                 产品领域与能力服务
     device.rs              物模型：Protocol/Property/Value
     event.rs               网关事件：GatewayEvent（设备身份、在场、属性）
     bus.rs                 UI 最新快照和独立上云队列
-    command/             set_power 入口及持久化结果交付
+    command/               set_power 入口及持久化结果交付
     identity.rs            gateway_id、boot_counter、boot_id、seq
-    presence.rs            设备在线判定（纯逻辑，可宿主测试）
     access/                接入能力
-      zigbee.rs            Zigbee 协调器服务：入网、发现、上报、在场
+      zigbee/              Zigbee 协调器服务，含发现、上报、在场与控制
   ui/                      展示层：唯一允许写 OLED 的地方
     console.rs             状态页行缓冲与分页刷新（后端无关）
     icon.rs                图标词汇
@@ -87,7 +86,7 @@ C 事件队列 ──> Zigbee 服务 ──> GatewayEvent ──┬─> UI 最�
 
 | 里程碑 | 能力 | 代码落点 |
 | --- | --- | --- |
-| M1（已完成） | Zigbee 接入观察、身份、UI 状态页 | `gateway/access/zigbee.rs`、`gateway/identity.rs`、`ui/` |
+| M1（已完成） | Zigbee 接入观察、身份、UI 状态页 | `gateway/access/zigbee/`、`gateway/identity.rs`、`ui/` |
 | M2 | Zigbee 本地 `set_power`、回读确认、命令去重与结果交付 | `gateway/command/`、`gateway/access/zigbee/` |
 | M3 | Wi-Fi + MQTT 上云：events/status/commands/results、心跳、断网补传 | `gateway/uplink/`、`drivers/net/wifi.rs` |
 | M4 | SD 上的 `rules.toml` 本地 TCA、离线队列持久化 | `gateway/rules/`、`gateway/storage/`、`drivers/board/sdcard.rs` |

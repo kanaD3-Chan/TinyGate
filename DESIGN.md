@@ -123,7 +123,7 @@
 - **保存内容**：命令去重与结果、离线事件队列、日志尾、必要的设备/规则状态。保存顺序与实现由存储/命令模块提供，电源驱动不决定业务写什么。
 - **不提供的接口**：电池电压、SoC、剩余续航、长时间 UPS 运行。`drivers/board/power.rs` 只暴露 `init`、`mains_lost`、`rail_voltage`；`rail_voltage` 仅用于估算保存窗口，不是电量。
 - **窗口标定**：超级电容容量、掉电检测 GPIO/ADC 引脚与保存预算待硬件确认并实测；未标定前不得在代码或 UI 承诺具体毫秒数，也不得把“已发起保存”报告为“已保证落盘”。
-- **落点**：`components/c_drivers` 占位函数改为 `tg_power_*`；Rust 门面为 `drivers/board/power.rs`；掉电编排在 `gateway/power.rs`，依赖 M3 的存储与命令日志。
+- **落点**：`components/tg_power` 保留电源保持接口，等待板级检测与采样；Rust 门面为 `drivers/board/power.rs`；掉电编排在 `gateway/power.rs`，依赖 M3 的存储与命令日志。
 
 
 

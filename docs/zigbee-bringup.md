@@ -1,6 +1,6 @@
 # 双 C6 Zigbee 联调
 
-下文包含 `demo` 分支的双板联调流程。产品主线使用 [Zigbee 接入服务](architecture.md#事件流)，现行 C ABI 以 [tg_zigbee.h](../components/tg_zigbee/include/tg_zigbee.h) 为准。
+下文的 Demo 部分对应[历史联调快照](https://github.com/SivRoua/TinyGate/tree/c3bdc2274f8eb0f3d6e7c7619528029b77e7f36f)。产品主线使用 [Zigbee 接入服务](architecture.md#事件流)，现行 C ABI 以 [tg_zigbee.h](../components/tg_zigbee/include/tg_zigbee.h) 为准。
 
 ## 主线接入验证
 
@@ -100,10 +100,6 @@ cargo build
 # 明确选择网关串口后烧录，模板 runner 也提供等效 cargo run
 espflash flash --port COM_GATEWAY --monitor --partition-table partitions.csv target/riscv32imac-esp-espidf/debug/tiny-gate
 
-# 原板上 Wi-Fi/BLE/OLED 演示仍可构建与运行
-cargo build --no-default-features
-cargo run --no-default-features
-
 # 副板，在已激活 ESP-IDF v6.1 的终端
 cd ../TinyGate-ZigbeeNode
 idf.py build
@@ -114,15 +110,9 @@ idf.py -p COM_NODE flash monitor
 副板目录的 build.ps1 仅为本机已安装 C6 工具提供便利构建入口，不负责下载 SDK、烧录或擦除。
 两板应分别使用各自构建产物，不要将网关和节点固件烧反。
 
-## 验收记录
+## Demo 实物验收
 
-```powershell
-rustc --test src/drivers/radio/zigbee_check.rs -o target/zigbee-check-tests.exe
-./target/zigbee-check-tests.exe
-```
-
-主机测试覆盖“发送成功不足以通过”、回调顺序、错误事务、错误目标状态及协议失败。
-还必须进行以下实物验证，本次代码构建不代替射频测试：
+配套 Demo 固件的实物验收见下表。主线的宿主测试和实物验收要求见[主线接入验证](#主线接入验证)。
 
 | 场景 | 预期 |
 | --- | --- |

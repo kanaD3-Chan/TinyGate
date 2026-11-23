@@ -2,5 +2,4 @@
 pub mod ble;
 pub mod ble_ad;
 pub mod zigbee;
-pub mod zigbee_check;
 pub(crate) mod zigbee_event;
