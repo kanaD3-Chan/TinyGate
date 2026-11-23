@@ -1,10 +1,15 @@
+mod format;
+
 use super::{Outcome, ResultEvent, SetPower, SubmitError, Work, utc_now};
 use embassy_time::{Duration, Instant};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use serde::{Deserialize, Serialize};
 
-const SLOTS: usize = 16;
-const RETENTION_MS: u64 = 600_000;
+// At most 148 bytes per new record. Budget seven 32-byte NVS entries per
+// record, leaving space in the 24 KiB partition for GC and other namespaces.
+const SLOTS: usize = 64;
+const REMOTE_RETENTION_MS: u64 = 600_000;
+const LOCAL_RETENTION: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Stored {
@@ -22,13 +27,14 @@ struct Entry {
 
 pub(super) struct Journal {
     nvs: EspDefaultNvs,
-    entries: [Option<Entry>; SLOTS],
+    entries: Box<[Option<Entry>]>,
 }
 
 impl Journal {
     pub fn open(partition: EspDefaultNvsPartition) -> anyhow::Result<Self> {
         let nvs = EspDefaultNvs::new(partition, "tg_cmd_v1", true)?;
-        let mut entries = std::array::from_fn(|_| None);
+        let mut entries: Vec<Option<Entry>> = (0..SLOTS).map(|_| None).collect();
+        let local_floor = Instant::now() + LOCAL_RETENTION;
         for (index, entry) in entries.iter_mut().enumerate() {
             let key = key(index);
             if let Some(len) = nvs.blob_len(&key)? {
@@ -38,14 +44,17 @@ impl Journal {
                     .get_blob(&key, &mut bytes)?
                     .ok_or_else(|| anyhow::anyhow!("command journal record disappeared"))?;
                 *entry = Some(Entry {
-                    stored: serde_json::from_slice(value)?,
+                    stored: Stored::decode(value)?,
                     local_deadline: None,
-                    reclaim_local_after: Instant::now() + Duration::from_millis(RETENTION_MS),
+                    reclaim_local_after: local_floor,
                     recovery: true,
                 });
             }
         }
-        Ok(Self { nvs, entries })
+        Ok(Self {
+            nvs,
+            entries: entries.into_boxed_slice(),
+        })
     }
 
     pub fn enqueue(
@@ -72,14 +81,12 @@ impl Journal {
         let slot = self
             .entries
             .iter()
-            .position(|entry| entry.is_none())
-            .or_else(|| {
-                self.entries.iter().position(|entry| {
-                    entry
-                        .as_ref()
-                        .is_some_and(|entry| entry.reclaimable(now_utc, now))
-                })
+            .position(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.reclaimable(now_utc, now))
             })
+            .or_else(|| self.entries.iter().position(Option::is_none))
             .ok_or(SubmitError::Full)?;
         let stored = Stored {
             command,
@@ -90,8 +97,7 @@ impl Journal {
         self.entries[slot] = Some(Entry {
             stored,
             local_deadline,
-            reclaim_local_after: local_deadline.unwrap_or(now)
-                + Duration::from_millis(RETENTION_MS),
+            reclaim_local_after: local_deadline.unwrap_or(now) + LOCAL_RETENTION,
             recovery: false,
         });
         Ok(())
@@ -176,7 +182,9 @@ impl Entry {
             return false;
         }
         match self.stored.command.expires_at_ms {
-            Some(expires) => now_utc.is_some_and(|now| now >= expires.saturating_add(RETENTION_MS)),
+            Some(expires) => {
+                now_utc.is_some_and(|now| now >= expires.saturating_add(REMOTE_RETENTION_MS))
+            }
             None => now >= self.reclaim_local_after,
         }
     }
@@ -187,8 +195,33 @@ fn key(index: usize) -> String {
 }
 
 fn persist(nvs: &EspDefaultNvs, index: usize, stored: &Stored) -> anyhow::Result<()> {
-    let bytes = serde_json::to_vec(stored)?;
-    nvs.set_blob(&key(index), &bytes)?;
+    write_blob(nvs, &key(index), &stored.encode()?)
+}
+
+// EspNvs::set_blob erases the old key first. ESP-IDF's same-key update
+// writes a new blob version before retiring the old one.
+#[cfg(target_os = "espidf")]
+fn write_blob(nvs: &EspDefaultNvs, key: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    use esp_idf_svc::handle::RawHandle;
+    use esp_idf_svc::sys::{self, EspError};
+
+    let key = std::ffi::CString::new(key)?;
+    // The NVS handle, key and bytes remain valid throughout both calls.
+    unsafe {
+        EspError::convert(sys::nvs_set_blob(
+            nvs.handle(),
+            key.as_ptr(),
+            bytes.as_ptr().cast(),
+            bytes.len(),
+        ))?;
+        EspError::convert(sys::nvs_commit(nvs.handle()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "espidf"))]
+fn write_blob(nvs: &EspDefaultNvs, key: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    nvs.set_blob(key, bytes)?;
     Ok(())
 }
 
@@ -255,5 +288,90 @@ mod tests {
         ));
         journal.enqueue(command, None).unwrap();
         assert_eq!(journal.pending_results(), vec![result]);
+    }
+
+    #[test]
+    fn reads_a_legacy_record_and_rewrites_it_with_the_size_bound() {
+        let partition = EspDefaultNvsPartition::take().unwrap();
+        let nvs = EspDefaultNvs::new(partition.clone(), "tg_cmd_v1", true).unwrap();
+        let mut legacy = Stored {
+            command: command(),
+            outcome: Some(Outcome::Accepted),
+            delivered: false,
+        };
+        legacy.command.command_id = "x".repeat(crate::gateway::command::MAX_COMMAND_ID_BYTES);
+        nvs.set_blob("cmd00", &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+        let mut journal = Journal::open(partition.clone()).unwrap();
+        assert!(journal.next_work(true).unwrap().was_accepted);
+        journal
+            .record(&legacy.command.command_id, Outcome::Succeeded)
+            .unwrap();
+        assert_eq!(nvs.blob_len("cmd00").unwrap(), Some(148));
+        let reopened = Journal::open(partition).unwrap();
+        assert_eq!(reopened.pending_results()[0].outcome, Outcome::Succeeded);
+    }
+
+    #[test]
+    fn under_capacity_pressure_only_acknowledged_expired_records_are_reused() {
+        let partition = EspDefaultNvsPartition::take().unwrap();
+        let mut journal = Journal::open(partition.clone()).unwrap();
+        let now = Instant::now();
+        for index in 0..SLOTS {
+            let mut record = command();
+            record.command_id = format!("burst-{index}");
+            journal.enqueue(record, Some(now)).unwrap();
+        }
+        let next = command();
+        assert!(matches!(
+            journal.enqueue(next.clone(), Some(now)),
+            Err(SubmitError::Full)
+        ));
+
+        let id = "burst-0";
+        journal.record(id, Outcome::Succeeded).unwrap();
+        let index = journal.find(id).unwrap();
+        let entry = journal.entries[index].as_mut().unwrap();
+        entry.reclaim_local_after = now;
+        assert!(matches!(
+            journal.enqueue(next.clone(), Some(now)),
+            Err(SubmitError::Full)
+        ));
+
+        let ack = journal
+            .pending_results()
+            .into_iter()
+            .find(|result| result.command.command_id == id)
+            .unwrap();
+        journal.acknowledge(&ack).unwrap();
+        journal.enqueue(next.clone(), Some(now)).unwrap();
+        let reopened = Journal::open(partition).unwrap();
+        assert!(reopened.find(id).is_none());
+        assert!(reopened.find("burst-1").is_some());
+        assert!(reopened.find(&next.command_id).is_some());
+    }
+
+    #[test]
+    fn cloud_records_need_both_delivery_and_the_contract_retention_window() {
+        let expires = 20_000;
+        let now = Instant::now();
+        let mut entry = Entry {
+            stored: Stored {
+                command: SetPower {
+                    expires_at_ms: Some(expires),
+                    ..command()
+                },
+                outcome: Some(Outcome::Succeeded),
+                delivered: true,
+            },
+            local_deadline: None,
+            reclaim_local_after: now,
+            recovery: false,
+        };
+        assert!(!entry.reclaimable(None, now));
+        assert!(!entry.reclaimable(Some(expires + REMOTE_RETENTION_MS - 1), now));
+        assert!(entry.reclaimable(Some(expires + REMOTE_RETENTION_MS), now));
+        entry.stored.delivered = false;
+        assert!(!entry.reclaimable(Some(expires + REMOTE_RETENTION_MS), now));
     }
 }

@@ -9,9 +9,11 @@
 - 在 Linux 开发机用宿主 Rust 测试跑模拟双节点、乱序回执、命令日志恢复和独立事件消费。
 
   ```sh
-  cargo +stable test --offline --manifest-path tests/zigbee-host/Cargo.toml --target x86_64-unknown-linux-gnu
+  cd tests/zigbee-host
+  cargo test
   ```
 
+- 寻址表暂时缺失时，主线在命令有效期内发起 IEEE 地址查询。收到匹配的目标后才重新尝试发出开关命令。已知路由冲突按设备离线处理，设备协议负回执才判为设备拒绝。Bind 回执带回短地址、IEEE、端点和 Cluster，Rust 与请求 ID 一并核对。
 - 硬件验收使用两个可独立控制的节点，检查读回确认、迟到回执及换短地址。再选择一个依赖绑定才上报的节点，核对 Bind 与配置回执，并观察其实际报告。配套 Demo 节点的定向主动上报无法覆盖这项验证。
 
 ## 两个独立工程

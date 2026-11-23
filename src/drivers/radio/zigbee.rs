@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use esp_idf_svc::sys;
 use std::sync::atomic::AtomicBool;
 
-pub use super::zigbee_event::{Attribute, Event, Payload, Reporting, Source, Target};
+pub use super::zigbee_event::{Attribute, Event, OnOffError, Payload, Reporting, Source, Target};
 
 static OWNED: AtomicBool = AtomicBool::new(false);
 
@@ -113,6 +113,8 @@ impl Coordinator {
                 status,
             },
             sys::TG_ZB_BIND => Event::Bound {
+                target,
+                ieee,
                 request_id: raw.request_id,
                 status,
             },
@@ -167,19 +169,29 @@ impl Coordinator {
         )
     }
 
-    pub fn onoff(&mut self, target: Target, ieee: [u8; 8], on: bool, id: u32) -> Result<()> {
-        check(
-            unsafe {
-                sys::tg_zigbee_send_onoff(
-                    target.address,
-                    ieee.as_ptr(),
-                    target.endpoint,
-                    u8::from(on),
-                    id,
-                )
-            },
-            "Zigbee on/off",
-        )
+    pub fn onoff(
+        &mut self,
+        target: Target,
+        ieee: [u8; 8],
+        on: bool,
+        id: u32,
+    ) -> std::result::Result<(), OnOffError> {
+        let code = unsafe {
+            sys::tg_zigbee_send_onoff(
+                target.address,
+                ieee.as_ptr(),
+                target.endpoint,
+                u8::from(on),
+                id,
+            )
+        };
+        match code {
+            sys::ESP_OK => Ok(()),
+            sys::ESP_ERR_NOT_FOUND => Err(OnOffError::RouteUnknown),
+            sys::ESP_ERR_INVALID_RESPONSE => Err(OnOffError::RouteChanged),
+            sys::ESP_ERR_TIMEOUT => Err(OnOffError::Busy),
+            code => Err(OnOffError::Submit(code)),
+        }
     }
 
     pub fn bind(&mut self, target: Target, ieee: [u8; 8], id: u32) -> Result<()> {

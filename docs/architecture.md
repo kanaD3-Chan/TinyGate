@@ -71,7 +71,7 @@ C 事件队列 ──> Zigbee 服务 ──> GatewayEvent ──┬─> UI 最�
 
 短地址、ZCL 事务号和 C 队列溢出恢复由 Zigbee 服务处理。上云队列满时丢弃新观测并增加 `uplink_dropped()`，UI 快照继续更新。命令发出之前持久化受理状态，终态先落盘，再由调用方通过 `pending_results()` 读取、在交付成功后调用 `acknowledge()`。确认旧状态不会移除更新的终态。
 
-调用方可使用 `command::submit_local` 发起带单调时钟超时的本地控制。后端命令使用 `command::submit` 和 UTC 到期时间，接入方在对时后调用 `set_network_time`。NVS 日志有 16 个槽位。终态已确认交付且保留期届满后可复用，满时返回 `SubmitError::Full`。MQTT 发布、回执确认和时钟同步由上云服务接入。
+调用方可使用 `command::submit_local` 发起带单调时钟超时的本地控制。后端命令使用 `command::submit` 和 UTC 到期时间，接入方在对时后调用 `set_network_time`。NVS 日志最多保留 64 条命令，每条新记录最多 148 字节，并兼容读取旧 JSON 记录。云端命令按契约至少保留到到期后 10 分钟，本地命令在本地截止时间后保留 60 秒。只有已确认交付且超过保留期的终态才能复用槽位，所有槽位仍有保留要求时返回 `SubmitError::Full`。记录更新走 ESP-IDF 的同键版本更新。MQTT 发布、回执确认和时钟同步由上云服务接入。
 
 ## 掉电保存契约
 

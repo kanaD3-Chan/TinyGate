@@ -2,7 +2,7 @@
 mod peer;
 mod transaction;
 
-use crate::drivers::radio::zigbee::{Coordinator, Event, Status, Target};
+use crate::drivers::radio::zigbee::{Coordinator, Event, OnOffError, Status, Target};
 use crate::gateway::bus;
 use crate::gateway::command::{self, Failure, Outcome, Work};
 use crate::gateway::device::{DeviceId, Value};
@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use transaction::{Operation, Receipt, RequestIds, Transaction};
 
 const TICK: Duration = Duration::from_millis(20);
+const ROUTE_RETRY: Duration = Duration::from_secs(1);
+const SEND_RETRY: Duration = Duration::from_millis(100);
 const DISCOVERY_RETRY: Duration = Duration::from_secs(5);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(4);
 const RECOVERY_GRACE: Duration = Duration::from_secs(45);
@@ -70,6 +72,8 @@ struct Active {
     deadline: Instant,
     write: Option<Transaction>,
     write_sent: bool,
+    next_write_at: Instant,
+    route_retry_woken: bool,
     read: Option<Transaction>,
 }
 
@@ -319,7 +323,8 @@ impl Service {
                 let outcome = active.expiration();
                 self.finish_active(outcome);
             } else if self.power_target(&active.work) != Ok(active.target) {
-                self.finish_active(Outcome::Failed(Failure::ExecutionUncertain));
+                let outcome = active.route_lost();
+                self.finish_active(outcome);
             }
         }
 
@@ -336,6 +341,11 @@ impl Service {
         }
 
         if let Some(radio) = radio.filter(|_| self.ready) {
+            if self.active.as_ref().is_some_and(|active| {
+                !active.write_sent && active.write.is_none() && now >= active.next_write_at
+            }) {
+                self.try_start_write(radio, now);
+            }
             if self
                 .active
                 .as_ref()
@@ -450,12 +460,18 @@ impl Service {
             deadline,
             write: None,
             write_sent: recovery,
+            next_write_at: now,
+            route_retry_woken: false,
             read: None,
         });
         if recovery {
             self.start_readback(radio);
-            return;
+        } else {
+            self.try_start_write(radio, now);
         }
+    }
+
+    fn try_start_write(&mut self, radio: &mut Coordinator, now: Instant) {
         let id = self.next_id();
         let active = self.active.as_mut().unwrap();
         if active.expired(Instant::now()) {
@@ -463,17 +479,28 @@ impl Service {
             self.finish_active(outcome);
             return;
         }
+        let target = active.target;
+        let ieee = active.work.command.device.ieee();
         let on = active.work.command.on;
-        if let Err(err) = radio.onoff(target, active.work.command.device.ieee(), on, id) {
-            warn!("Could not submit Zigbee command: {err:#}");
-            self.finish_active(Outcome::Failed(Failure::Rejected));
-        } else {
-            active.write = Some(Transaction::new(
-                id,
-                target,
-                active.work.command.device.ieee(),
-                Operation::SetPower(on),
-            ));
+        match radio.onoff(target, ieee, on, id) {
+            Ok(()) => {
+                active.write = Some(Transaction::new(id, target, ieee, Operation::SetPower(on)))
+            }
+            Err(OnOffError::RouteUnknown) => {
+                active.next_write_at = now + ROUTE_RETRY;
+                if let Err(err) = radio.resolve(target.address) {
+                    log::debug!("Resolve command route {target:?}: {err:#}");
+                }
+            }
+            Err(OnOffError::Busy) => active.next_write_at = now + SEND_RETRY,
+            Err(OnOffError::RouteChanged) => {
+                self.unresolved(target.address);
+                self.finish_active(Outcome::Failed(Failure::DeviceOffline));
+            }
+            Err(OnOffError::Submit(code)) => {
+                warn!("Could not submit Zigbee command to {target:?}: ESP error {code:#x}");
+                self.finish_active(Outcome::Failed(Failure::ExecutionUncertain));
+            }
         }
     }
 
@@ -506,10 +533,20 @@ impl Service {
             return;
         }
         if self.power_target(&active.work) != Ok(active.target) {
-            self.finish_active(Outcome::Failed(Failure::ExecutionUncertain));
+            let outcome = active.route_lost();
+            self.finish_active(outcome);
             return;
         }
         let active = self.active.as_mut().unwrap();
+        if !active.write_sent
+            && active.write.is_none()
+            && !active.route_retry_woken
+            && matches!(event, Event::Identity { address, ieee, status: 0 }
+                if address == active.target.address && ieee == active.work.command.device.ieee())
+        {
+            active.next_write_at = now;
+            active.route_retry_woken = true;
+        }
         if let Some(receipt) = active.write.as_mut().and_then(|tx| tx.feed(event)) {
             match receipt {
                 Receipt::Sent => active.write_sent = true,
@@ -615,8 +652,15 @@ impl Service {
     fn maintenance_event(&mut self, event: Event) {
         let Some(setup) = &mut self.setup else { return };
         let success = match event {
-            Event::Bound { request_id, status }
-                if request_id == setup.id && setup.phase == Setup::Bind =>
+            Event::Bound {
+                target,
+                ieee,
+                request_id,
+                status,
+            } if request_id == setup.id
+                && setup.phase == Setup::Bind
+                && target == setup.target
+                && ieee == setup.device.ieee() =>
             {
                 status == 0
             }
@@ -658,6 +702,15 @@ impl Service {
 }
 
 impl Active {
+    fn route_lost(&self) -> Outcome {
+        let failure = if self.write.is_none() && !self.write_sent {
+            Failure::DeviceOffline
+        } else {
+            Failure::ExecutionUncertain
+        };
+        Outcome::Failed(failure)
+    }
+
     fn expired(&self, now: Instant) -> bool {
         now >= self.deadline || self.gateway_deadline_passed()
     }
@@ -788,10 +841,21 @@ mod tests {
         );
 
         let request = command_for("on", true);
+        radio.onoff_error = Some(OnOffError::RouteUnknown);
         command::submit_local(request.clone(), 5000).unwrap();
         service.tick(Some(&mut radio));
+        assert!(radio.writes.is_empty());
+        assert_eq!(radio.resolutions, [TARGET.address]);
+        assert_eq!(outcome("on"), Outcome::Accepted);
+        service.event(Event::Identity {
+            address: TARGET.address,
+            ieee: IEEE,
+            status: 0,
+        });
+        service.tick(Some(&mut radio));
         let (target, ieee, on, write_id) = radio.writes[0];
-        assert_eq!((target, ieee, on, write_id), (TARGET, IEEE, true, 1));
+        assert_eq!((target, ieee, on), (TARGET, IEEE, true));
+        assert_ne!(write_id, 0);
         service.event(sent(write_id, 1));
         service.tick(Some(&mut radio));
         let (_, _, read_id) = radio.reads[0];
@@ -855,6 +919,16 @@ mod tests {
             Outcome::Failed(Failure::ExecutionUncertain)
         );
 
+        radio.onoff_error = Some(OnOffError::RouteChanged);
+        command::submit_local(command_for("route-conflict", true), 5000).unwrap();
+        service.tick(Some(&mut radio));
+        service.tick(Some(&mut radio));
+        assert_eq!(
+            outcome("route-conflict"),
+            Outcome::Failed(Failure::DeviceOffline)
+        );
+        assert_eq!(radio.writes.len(), 4);
+
         let new_target = Target {
             address: 0x1236,
             ..TARGET
@@ -893,8 +967,28 @@ mod tests {
         service.maintain(&mut radio, later);
         let bind = service.setup.as_ref().unwrap();
         assert_eq!(bind.phase, Setup::Bind);
+        let bind_id = bind.id;
         service.maintenance_event(Event::Bound {
-            request_id: bind.id,
+            target: TARGET,
+            ieee: [2; 8],
+            request_id: bind_id,
+            status: 0,
+        });
+        assert_eq!(service.setup.as_ref().unwrap().phase, Setup::Bind);
+        service.maintenance_event(Event::Bound {
+            target: Target {
+                endpoint: TARGET.endpoint + 1,
+                ..TARGET
+            },
+            ieee: IEEE,
+            request_id: bind_id,
+            status: 0,
+        });
+        assert_eq!(service.setup.as_ref().unwrap().phase, Setup::Bind);
+        service.maintenance_event(Event::Bound {
+            target: TARGET,
+            ieee: IEEE,
+            request_id: bind_id,
             status: 0,
         });
         service.maintain(&mut radio, later);

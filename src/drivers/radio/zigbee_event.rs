@@ -84,6 +84,8 @@ pub enum Event {
         status: i32,
     },
     Bound {
+        target: Target,
+        ieee: [u8; 8],
         request_id: u32,
         status: i32,
     },
@@ -100,4 +102,12 @@ pub struct Reporting {
     pub min_interval_s: u16,
     pub max_interval_s: u16,
     pub change: &'static [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnOffError {
+    RouteUnknown,
+    RouteChanged,
+    Busy,
+    Submit(i32),
 }

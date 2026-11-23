@@ -14,23 +14,90 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static tg_zigbee_status_t s_status;
 static QueueHandle_t s_events;
 static const char *TAG = "TG-Zigbee";
-enum { COORDINATOR_ENDPOINT = 1, SDK_LOCK_MS = 20, MAX_DISCOVERY_ENDPOINTS = 8 };
+enum {
+    COORDINATOR_ENDPOINT = 1,
+    SDK_LOCK_MS = 20,
+    MAX_DISCOVERY_ENDPOINTS = 8,
+    ROUTE_PROOFS = 16,
+    ROUTE_PROOF_MS = 10000,
+    BIND_REQUESTS = 8,
+    BIND_CONTEXT_MS = 30000,
+};
+
+/* Accessed with the SDK lock held or from an SDK callback. */
+static struct {
+    uint16_t address;
+    uint8_t ieee[8];
+    TickType_t observed_at;
+} s_routes[ROUTE_PROOFS];
+static size_t s_next_route;
+
+typedef struct {
+    tg_zigbee_event_t event;
+    TickType_t submitted_at;
+} bind_context_t;
+
+static bind_context_t s_bind_requests[BIND_REQUESTS];
 
 static bool valid_address(uint16_t address)
 {
     return address > 0 && address < 0xfff8;
 }
 
+static void remember_route(uint16_t address, const uint8_t ieee[8])
+{
+    const uint8_t unknown[8] = {0};
+    const uint8_t broadcast[8] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    if (!valid_address(address) || !memcmp(ieee, unknown, 8) || !memcmp(ieee, broadcast, 8)) return;
+
+    size_t slot = s_next_route;
+    for (size_t i = 0; i < ROUTE_PROOFS; ++i) {
+        if (s_routes[i].address == address || memcmp(s_routes[i].ieee, ieee, 8) == 0) {
+            s_routes[i].address = 0;
+            slot = i;
+        }
+    }
+    s_routes[slot].address = address;
+    memcpy(s_routes[slot].ieee, ieee, sizeof(s_routes[slot].ieee));
+    s_routes[slot].observed_at = xTaskGetTickCount();
+    s_next_route = (slot + 1) % ROUTE_PROOFS;
+}
+
+static esp_err_t identity_at(uint16_t address, uint8_t ieee[8])
+{
+    if (!valid_address(address)) return ESP_ERR_NOT_FOUND;
+    ezb_extaddr_t candidate;
+    bool found = ezb_address_extended_by_short(address, &candidate) == EZB_ERR_NONE;
+    TickType_t now = xTaskGetTickCount();
+    /* Check recent announces and ZDO responses even if the SDK has an entry,
+     * since the table may lag behind an address change. */
+    for (size_t i = 0; i < ROUTE_PROOFS; ++i) {
+        if (!s_routes[i].address ||
+            now - s_routes[i].observed_at >= pdMS_TO_TICKS(ROUTE_PROOF_MS)) continue;
+        if (s_routes[i].address == address) {
+            if (found && memcmp(candidate.u8, s_routes[i].ieee, sizeof(candidate.u8))) {
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+            memcpy(candidate.u8, s_routes[i].ieee, sizeof(candidate.u8));
+            found = true;
+        } else if (found && !memcmp(candidate.u8, s_routes[i].ieee, sizeof(candidate.u8))) {
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+    if (!found) return ESP_ERR_NOT_FOUND;
+
+    uint16_t current_address;
+    if (ezb_address_short_by_extended(&candidate, &current_address) == EZB_ERR_NONE &&
+        current_address != address) {
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    memcpy(ieee, candidate.u8, sizeof(candidate.u8));
+    return ESP_OK;
+}
+
 static void lookup_ieee(tg_zigbee_event_t *event)
 {
-    ezb_extaddr_t ieee;
-    uint16_t current_address;
-    if (valid_address(event->short_address) &&
-        ezb_address_extended_by_short(event->short_address, &ieee) == EZB_ERR_NONE &&
-        ezb_address_short_by_extended(&ieee, &current_address) == EZB_ERR_NONE &&
-        current_address == event->short_address) {
-        memcpy(event->ieee_address, ieee.u8, sizeof(event->ieee_address));
-    }
+    identity_at(event->short_address, event->ieee_address);
 }
 
 static void emit(tg_zigbee_event_t event)
@@ -128,8 +195,15 @@ static void identity_result(const ezb_zdo_ieee_addr_req_result_t *result, void *
             &current_address) == EZB_ERR_NONE && current_address != event.short_address) {
             event.status = ESP_ERR_INVALID_RESPONSE;
         }
+        uint8_t known[8];
+        esp_err_t previous = identity_at(event.short_address, known);
+        if (!event.status && (previous == ESP_ERR_INVALID_RESPONSE ||
+            (previous == ESP_OK && memcmp(known, result->rsp->ieee_addr_remote_dev.u8, sizeof(known))))) {
+            event.status = ESP_ERR_INVALID_RESPONSE;
+        }
         if (!event.status) {
             memcpy(event.ieee_address, result->rsp->ieee_addr_remote_dev.u8, sizeof(event.ieee_address));
+            remember_route(event.short_address, event.ieee_address);
         }
     }
     emit(event);
@@ -165,6 +239,7 @@ static bool app_signal(const ezb_app_signal_t *signal)
         if (!p) break;
         tg_zigbee_event_t event = {.kind=TG_ZB_JOIN, .short_address=p->short_addr};
         memcpy(event.ieee_address, p->device_addr.u8, 8);
+        remember_route(event.short_address, event.ieee_address);
         peer_seen(p->short_addr);
         emit(event);
         break;
@@ -174,6 +249,12 @@ static bool app_signal(const ezb_app_signal_t *signal)
         if (!p) break;
         tg_zigbee_event_t event = {.kind=TG_ZB_LEAVE, .short_address=p->short_addr};
         memcpy(event.ieee_address, p->device_addr.u8, 8);
+        for (size_t i = 0; i < ROUTE_PROOFS; ++i) {
+            if (s_routes[i].address == event.short_address &&
+                memcmp(s_routes[i].ieee, event.ieee_address, sizeof(event.ieee_address)) == 0) {
+                s_routes[i].address = 0;
+            }
+        }
         portENTER_CRITICAL(&s_lock);
         if (s_status.peer_address == p->short_addr) s_status.peer_address = 0xffff;
         portEXIT_CRITICAL(&s_lock);
@@ -406,11 +487,14 @@ esp_err_t tg_zigbee_send_onoff(uint16_t address,const uint8_t ieee_address[8],
 {
     if (!valid_target(address,ep,id) || !ieee_address || command > 2) return ESP_ERR_INVALID_ARG;
     esp_err_t err=lock_ready(); if (err) return err;
-    tg_zigbee_event_t peer = {.short_address=address};
-    lookup_ieee(&peer);
-    if (memcmp(peer.ieee_address, ieee_address, sizeof(peer.ieee_address))) {
+    uint8_t resolved[8];
+    err = identity_at(address, resolved);
+    if (err == ESP_OK && memcmp(resolved, ieee_address, sizeof(resolved))) {
+        err = ESP_ERR_INVALID_RESPONSE;
+    }
+    if (err != ESP_OK) {
         esp_zigbee_lock_release();
-        return ESP_ERR_NOT_FOUND;
+        return err;
     }
     ezb_zcl_on_off_cmd_t req={.cmd_ctrl={
         .dst_addr={.addr_mode=EZB_ADDR_MODE_SHORT,.u.short_addr=address},
@@ -423,9 +507,22 @@ esp_err_t tg_zigbee_send_onoff(uint16_t address,const uint8_t ieee_address[8],
 
 static void bind_result(const ezb_zdp_bind_req_result_t *result, void *ctx)
 {
-    int32_t status = ESP_FAIL;
-    if (result) status = result->error ? result->error : result->rsp ? result->rsp->status : ESP_FAIL;
-    emit((tg_zigbee_event_t){.kind=TG_ZB_BIND, .request_id=(uint32_t)(uintptr_t)ctx, .status=status});
+    uint32_t id = (uint32_t)(uintptr_t)ctx;
+    for (size_t i = 0; i < BIND_REQUESTS; ++i) {
+        bind_context_t *slot = &s_bind_requests[i];
+        if (slot->event.request_id != id) continue;
+
+        tg_zigbee_event_t event = slot->event;
+        slot->event.request_id = 0;
+        event.status = ESP_FAIL;
+        if (result && result->error) {
+            event.status = result->error;
+        } else if (result && result->rsp) {
+            event.status = result->rsp->status;
+        }
+        emit(event);
+        return;
+    }
 }
 
 esp_err_t tg_zigbee_bind(uint16_t address,const uint8_t ieee_address[8],uint8_t ep,uint16_t cluster,uint32_t id)
@@ -433,6 +530,29 @@ esp_err_t tg_zigbee_bind(uint16_t address,const uint8_t ieee_address[8],uint8_t 
     if (!valid_target(address,ep,id) || !ieee_address) return ESP_ERR_INVALID_ARG;
     esp_err_t err = lock_ready();
     if (err) return err;
+
+    TickType_t now = xTaskGetTickCount();
+    bind_context_t *slot = NULL;
+    for (size_t i = 0; i < BIND_REQUESTS; ++i) {
+        bind_context_t *candidate = &s_bind_requests[i];
+        if (now - candidate->submitted_at >= pdMS_TO_TICKS(BIND_CONTEXT_MS)) {
+            candidate->event.request_id = 0;
+        }
+        if (candidate->event.request_id == id) {
+            esp_zigbee_lock_release();
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!candidate->event.request_id && !slot) slot = candidate;
+    }
+    if (!slot) {
+        esp_zigbee_lock_release();
+        return ESP_ERR_NO_MEM;
+    }
+
+    slot->event = (tg_zigbee_event_t){.kind=TG_ZB_BIND, .request_id=id,
+        .short_address=address, .endpoint=ep, .cluster=cluster};
+    memcpy(slot->event.ieee_address, ieee_address, sizeof(slot->event.ieee_address));
+    slot->submitted_at = now;
     ezb_zdo_bind_req_t req = {
         .dst_nwk_addr=address,
         .field={.src_ep=ep, .cluster_id=cluster,
@@ -442,6 +562,7 @@ esp_err_t tg_zigbee_bind(uint16_t address,const uint8_t ieee_address[8],uint8_t 
     memcpy(req.field.src_addr.u8, ieee_address, sizeof(req.field.src_addr.u8));
     ezb_nwk_get_extended_address(&req.field.dst_addr.extended_addr);
     err = esp_zigbee_err_to_esp(ezb_zdo_bind_req(&req));
+    if (err != ESP_OK) slot->event.request_id = 0;
     esp_zigbee_lock_release();
     return err;
 }

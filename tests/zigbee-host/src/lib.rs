@@ -41,6 +41,8 @@ mod drivers {
             pub struct Coordinator {
                 pub writes: Vec<(Target, [u8; 8], bool, u32)>,
                 pub reads: Vec<(Target, u16, u32)>,
+                pub resolutions: Vec<u16>,
+                pub onoff_error: Option<OnOffError>,
             }
 
             impl Coordinator {
@@ -56,7 +58,8 @@ mod drivers {
                 pub fn permit_join(&mut self, _: u8) -> Result<()> {
                     Ok(())
                 }
-                pub fn resolve(&mut self, _: u16) -> Result<()> {
+                pub fn resolve(&mut self, address: u16) -> Result<()> {
+                    self.resolutions.push(address);
                     Ok(())
                 }
                 pub fn address_for(&mut self, _: [u8; 8]) -> Result<u16> {
@@ -81,7 +84,10 @@ mod drivers {
                     ieee: [u8; 8],
                     on: bool,
                     id: u32,
-                ) -> Result<()> {
+                ) -> std::result::Result<(), OnOffError> {
+                    if let Some(error) = self.onoff_error.take() {
+                        return Err(error);
+                    }
                     self.writes.push((target, ieee, on, id));
                     Ok(())
                 }

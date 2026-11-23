@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use journal::Journal;
 
 const MAX_TTL_MS: u64 = 30_000;
+const MAX_COMMAND_ID_BYTES: usize = 128;
 static JOURNAL: OnceLock<Mutex<Journal>> = OnceLock::new();
 static NETWORK_TIME: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
 
@@ -124,7 +125,8 @@ pub fn submit_local(command: SetPower, timeout_ms: u64) -> Result<(), SubmitErro
 
 fn enqueue(command: SetPower, local_deadline: Option<Instant>) -> Result<(), SubmitError> {
     if command.command_id.is_empty()
-        || command.command_id.len() > 128
+        || command.command_id.len() > MAX_COMMAND_ID_BYTES
+        || DeviceId::from_ieee(command.device.ieee()).is_none()
         || !(1..=240).contains(&command.endpoint)
     {
         return Err(SubmitError::Invalid);

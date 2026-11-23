@@ -81,10 +81,13 @@ esp_err_t tg_zigbee_address_for(const uint8_t ieee_address[8], uint16_t *address
 esp_err_t tg_zigbee_discover(uint16_t address);
 esp_err_t tg_zigbee_read_attribute(uint16_t address, uint8_t endpoint, uint16_t cluster,
                                   uint16_t attribute, uint32_t request_id);
-/* The cached short address must still belong to the supplied IEEE address. */
+/* ESP_ERR_NOT_FOUND: route identity unknown; resolve it before retrying.
+ * ESP_ERR_INVALID_RESPONSE: the address is known to belong to a different
+ * peer, or the SDK mapping disagrees. No command is submitted in either case. */
 esp_err_t tg_zigbee_send_onoff(uint16_t address, const uint8_t ieee_address[8],
                               uint8_t endpoint, uint8_t command,
                               uint32_t request_id); /* command 0/1/2 = off/on/toggle */
+/* TG_ZB_BIND includes the requested short address, IEEE, endpoint and cluster. */
 esp_err_t tg_zigbee_bind(uint16_t address, const uint8_t ieee_address[8], uint8_t endpoint,
                          uint16_t cluster, uint32_t request_id);
 esp_err_t tg_zigbee_configure_reporting(uint16_t address, uint8_t endpoint,
