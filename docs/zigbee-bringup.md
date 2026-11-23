@@ -1,5 +1,19 @@
 # 双 C6 Zigbee 联调
 
+下文包含 `demo` 分支的双板联调流程。产品主线使用 [Zigbee 接入服务](architecture.md#事件流)，现行 C ABI 以 [tg_zigbee.h](../components/tg_zigbee/include/tg_zigbee.h) 为准。
+
+## 主线接入验证
+
+- C 回调按 SDK 给出的 ZCL 类型复制原始属性，保留端点、Cluster、属性号、制造商代码和协议状态。每事件最多复制 32 字节，超长数据显式标记截断。Rust 产品层仅将指定的标准温度和开关属性映射成业务观测。
+- 主线先读属性，再尝试 Bind 与 Configure Reporting，收到匹配的配置回执后进入订阅状态。绑定或配置失败时每 60 秒尝试读回。静默超时按三倍配置周期处理，设备标识从 EUI‑64 派生。
+- 在 Linux 开发机用宿主 Rust 测试跑模拟双节点、乱序回执、命令日志恢复和独立事件消费。
+
+  ```sh
+  cargo +stable test --offline --manifest-path tests/zigbee-host/Cargo.toml --target x86_64-unknown-linux-gnu
+  ```
+
+- 硬件验收使用两个可独立控制的节点，检查读回确认、迟到回执及换短地址。再选择一个依赖绑定才上报的节点，核对 Bind 与配置回执，并观察其实际报告。配套 Demo 节点的定向主动上报无法覆盖这项验证。
+
 ## 两个独立工程
 
 - 当前仓库：Rust TinyGate + C `components/tg_zigbee`，协调器，OLED SDA20/SCL19。

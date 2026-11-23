@@ -3,8 +3,8 @@
 //! Nothing here touches the display; [`ViewState`] is pure state and
 //! [`ViewState::render`] hands finished strings to the [`Ui`] facade.
 use crate::drivers::sys;
+use crate::gateway::bus::UiSnapshot;
 use crate::gateway::device::{Property, Value};
-use crate::gateway::event::GatewayEvent;
 use crate::ui::{Links, Ui};
 
 #[derive(Default)]
@@ -17,21 +17,16 @@ pub struct ViewState {
 }
 
 impl ViewState {
-    pub fn apply(&mut self, event: GatewayEvent) {
-        match event {
-            GatewayEvent::RadioZigbee { ready } => self.zigbee_ready = ready,
-            GatewayEvent::PeerPresence { address, online } => self.peer = Some((address, online)),
-            GatewayEvent::Property {
-                property, value, ..
-            } => {
-                // Short 5x7-font labels; "TEMP 25.50 C" / "PWR ON".
-                let (label, unit) = match property {
-                    Property::Temperature => ("TEMP", " C"),
-                    Property::Power => ("PWR", ""),
-                };
-                self.latest = Some(format!("{label} {}{unit}", render_value(&value)));
-            }
-        }
+    pub fn apply(&mut self, snapshot: UiSnapshot) {
+        self.zigbee_ready = snapshot.zigbee_ready;
+        self.peer = snapshot.peer;
+        self.latest = snapshot.latest.map(|(property, value)| {
+            let (label, unit) = match property {
+                Property::Temperature => ("TEMP", " C"),
+                Property::Power => ("PWR", ""),
+            };
+            format!("{label} {}{unit}", render_value(&value))
+        });
     }
 
     pub fn render(&self, ui: &mut Ui) {

@@ -26,8 +26,9 @@ src/
     sys/                   芯片服务：system/temperature
   gateway/                 产品领域与能力服务
     device.rs              物模型：Protocol/Property/Value
-    event.rs               网关事件：GatewayEvent（总线上流动的事实）
-    bus.rs                 进程内事件总线（access → UI/上云/规则）
+    event.rs               网关事件：GatewayEvent（设备身份、在场、属性）
+    bus.rs                 UI 最新快照和独立上云队列
+    command/             set_power 入口及持久化结果交付
     identity.rs            gateway_id、boot_counter、boot_id、seq
     presence.rs            设备在线判定（纯逻辑，可宿主测试）
     access/                接入能力
@@ -48,7 +49,7 @@ main ──> app ──> gateway ──> drivers
 ```
 
 - `drivers/` 不依赖 `gateway/`、`ui/`、`app/`。
-- `gateway/` 只能通过 `drivers/` 访问硬件；唯一例外是 `identity.rs` 使用 esp-idf-svc 的 NVS **服务** 持久化业务数据。
+- `gateway/` 只能通过 `drivers/` 访问硬件。设备身份与命令模块通过共享的 esp-idf-svc NVS 服务持久化业务数据。
 - `ui/` 只能通过 `drivers/board/display` 拿屏幕，且 `Display` 只由 `Ui::new` 构造。
 - `app/` 可以依赖所有层，但只做装配与生命周期管理。
 
@@ -63,16 +64,14 @@ main ──> app ──> gateway ──> drivers
 ## 事件流
 
 ```text
-C 事件队列
-   │ poll
-   ▼
-access 服务 ──> GatewayEvent ──> bus ──┬─> ui 任务
-   │                                   ├─> uplink（M3）
-   │                                   └─> rules（M4）
-   └─ 设备/端点状态留在 access 内部
+C 事件队列 ──> Zigbee 服务 ──> GatewayEvent ──┬─> UI 最新快照
+       命令入口 ───┘                         └─> 独立上云观测队列
+                   └─> NVS 命令记录 ──> 待交付结果
 ```
 
-总线只传“值得对外表达的事实”；服务内部状态（端点表、请求 id、去重表）不穿过总线。
+短地址、ZCL 事务号和 C 队列溢出恢复由 Zigbee 服务处理。上云队列满时丢弃新观测并增加 `uplink_dropped()`，UI 快照继续更新。命令发出之前持久化受理状态，终态先落盘，再由调用方通过 `pending_results()` 读取、在交付成功后调用 `acknowledge()`。确认旧状态不会移除更新的终态。
+
+调用方可使用 `command::submit_local` 发起带单调时钟超时的本地控制。后端命令使用 `command::submit` 和 UTC 到期时间，接入方在对时后调用 `set_network_time`。NVS 日志有 16 个槽位。终态已确认交付且保留期届满后可复用，满时返回 `SubmitError::Full`。MQTT 发布、回执确认和时钟同步由上云服务接入。
 
 ## 掉电保存契约
 
@@ -89,7 +88,7 @@ access 服务 ──> GatewayEvent ──> bus ──┬─> ui 任务
 | 里程碑 | 能力 | 代码落点 |
 | --- | --- | --- |
 | M1（已完成） | Zigbee 接入观察、身份、UI 状态页 | `gateway/access/zigbee.rs`、`gateway/identity.rs`、`ui/` |
-| M2 | 命令执行、TX-confirm 验证、`command_id` 去重与过期 | `gateway/command.rs`、`gateway/access/zigbee.rs`、`drivers/radio/zigbee_check.rs` |
+| M2 | Zigbee 本地 `set_power`、回读确认、命令去重与结果交付 | `gateway/command/`、`gateway/access/zigbee/` |
 | M3 | Wi-Fi + MQTT 上云：events/status/commands/results、心跳、断网补传 | `gateway/uplink/`、`drivers/net/wifi.rs` |
 | M4 | SD 上的 `rules.toml` 本地 TCA、离线队列持久化 | `gateway/rules/`、`gateway/storage/`、`drivers/board/sdcard.rs` |
 | M5 | BLE 执行设备接入与 GATT 控制 | `gateway/access/ble.rs`、`drivers/radio/ble.rs` |
