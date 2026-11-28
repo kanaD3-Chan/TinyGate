@@ -125,5 +125,28 @@
 - **窗口标定**：超级电容容量、掉电检测 GPIO/ADC 引脚与保存预算待硬件确认并实测；未标定前不得在代码或 UI 承诺具体毫秒数，也不得把“已发起保存”报告为“已保证落盘”。
 - **落点**：`components/tg_power` 保留电源保持接口，等待板级检测与采样；Rust 门面为 `drivers/board/power.rs`；掉电编排在 `gateway/power.rs`，依赖 M3 的存储与命令日志。
 
+### 2026-11-28 Rust / C 责任边界
+
+- **背景**：2026-11-12 定下“Rust 底座、C 驱动”，2026-11-21 定下“C 拥有底层读写、Rust 只做上层业务”。但 `b47da04`、`3fdafd0` 由 C 侧直接改写 `src/gateway/`、`src/drivers/` 并在 `src/**` 内加入测试模块，分层只剩文档。自本条起按目录与提交人划定边界，不再靠默契。
+- **归属**：
+  - Rust 主线（kanaDE）：`src/**`、`Cargo.toml`、`Cargo.lock`、`build.rs`、`.cargo/**`、`rust-toolchain.toml`、`tests/zigbee-host/**`。`src/**` 内的所有 `#[cfg(test)]` 测试模块同属 Rust 主线。
+  - C 组件（Reacher）：`components/**`，含 `include/` 公开 ABI 头、`src/` 实现、`CMakeLists.txt`、`Kconfig`、`idf_component.yml`；C 侧测试放 `components/<name>/test/**`（设备端 Unity）或 `tests/*_test.c`（主机 gcc）；对应驱动文档也由 C 侧维护。
+  - 共享、需双方确认：`contracts/**`、`DESIGN.md`、`docs/architecture.md`、`partitions.csv`、`sdkconfig.defaults`、`components_esp32c6.lock`，以及 `Cargo.toml` 中 `extra_components` / `bindings_header` 这类跨边界构建接线。
+- **硬规则**：
+  1. C 侧不修改 `src/**` 下任何文件。为了测试 C 组件也不行：mock、fixture、临时打印、`#[cfg(test)]` 模块都不许塞进 `src/`。C 组件的测试落点见上。
+  2. Rust 侧不直接改 `components/**` 的 C 实现。发现 C 侧缺陷走 issue 或 PR 评论，由 C 侧修复；Rust 侧只维护 `src/drivers/**` 里的 `extern "C"` 声明与类型安全门面。
+  3. ABI 变更（`components/*/include/tg_*.h`、`components/platform_bindings.h`）必须成对交付：C 头文件变更与 Rust 门面适配放在同一变更集，或明确拆成“C ABI → Rust 适配”两个连续 PR。只改头导致主线编译失败不算完成，PR 描述必须写“ABI 变更”。
+  4. 一个 PR 只动一侧目录。跨边界改动必须显式标注并请对方 review；禁止借 `feat(zigbee)` 之类 scope 顺带重排、格式化、改写对方目录。
+  5. 判定标准是语言归属，不是目录名：Rust 代码（含 `tests/zigbee-host/**` 这类宿主测试夹具）只由 Rust 侧维护。C 侧可以运行该夹具、在 issue 里提出用例需求，但不能直接改；现有 Rust API 不可测时，由 Rust 侧先做可测性重构。
+- **图标豁免（唯一例外）**：Rust 侧可以为新增或调整 OLED 图标，直接修改 `components/tg_display/src/display_canvas.c` 的 `icons[]` 半字形表与码位注释，并在同一 PR 更新 `src/ui/icon.rs` 的常量。范围仅限图标数据；不得顺手改 `glyph()`、字体表、`tg_canvas_*`、`display_canvas.h` 或其他 C 文件。需要扩大图标数组结构或调整码位规划时先与 C 侧确认。
+  - 当前 `0x90..0xFF` 被 `tests/display_canvas_test.c` 约定为空白；扩展图标若越过 `0x8F`，由 C 侧同步调整该测试，Rust 侧不直接改 `tests/*_test.c`。
+  - 除本豁免外，`components/**` 仍按第 2 条归 C 侧。
+- **测试责任**：
+  - C 驱动行为（SDK 调用、队列、绑定/上报、掉电采样）由 C 侧在 C 测试中证明，不能只靠 Rust 单测反推。
+  - Rust 业务语义（去重、超时、状态机、UI 渲染）由 Rust 侧在 `src/**` 单测或 `tests/**` 宿主测试中证明；测试 mock 的是 `drivers` 门面，不是 C 源码。
+  - 上板联调共同进行，验收记录分清各自负责项；“联调需要”不构成 `src/**` 的写权限。
+- **执行**：`.github/CODEOWNERS` 对两侧目录分别要求对应 owner review，PR 模板加入边界检查项；GitHub 分支保护需开启 “Require review from Code Owners” 才会真正生效。发现越界提交时要求拆分，不合并混合提交。
+- **历史处理**：`b47da04`、`3fdafd0` 已合并的混合改动不回滚；其中位于 `src/**` 的测试模块由 Rust 侧接手维护，后续修改按本条执行。若其中测试实际在验证 C ABI 语义，迁移到 `components/<name>/test/**` 或 `tests/*_test.c`，不留在 `src/`。
+
 
 

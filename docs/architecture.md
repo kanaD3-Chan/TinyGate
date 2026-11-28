@@ -52,6 +52,28 @@ main ──> app ──> gateway ──> drivers
 - `ui/` 只能通过 `drivers/board/display` 拿屏幕，且 `Display` 只由 `Ui::new` 构造。
 - `app/` 可以依赖所有层，但只做装配与生命周期管理。
 
+## 责任边界与测试落点（2026-11-28）
+
+按仓库路径划分，不以“这次改动涉及哪个功能”划分。设计依据见 [DESIGN.md](../DESIGN.md) 同日条目。
+
+| 路径 | 负责人 | 可改内容 |
+| --- | --- | --- |
+| `src/**` | Rust 主线（kanaDE） | 业务、门面、Rust 单测；**C 侧不改任何文件** |
+| `Cargo.toml`、`Cargo.lock`、`build.rs`、`.cargo/**`、`rust-toolchain.toml` | Rust 主线 | 构建与依赖 |
+| `tests/zigbee-host/**` | Rust 主线 | 宿主测试夹具；C 侧可运行，改动由 Rust 侧做 |
+| `components/**` | C 组件（Reacher） | C 实现、公开头、CMake/Kconfig、组件依赖 |
+| `components/tg_display/src/display_canvas.c` | 共享（图标豁免） | Rust 侧仅可改 `icons[]` 图标半字形与码位注释；`glyph()`、字体表、`tg_canvas_*` 仍归 C |
+| `components/<name>/test/**`、`tests/*_test.c` | C 组件 | C 驱动测试 |
+| `contracts/**`、`DESIGN.md`、`docs/architecture.md` | 共享 | 跨边界变更需双方确认 |
+
+测试不跨边界借宿：
+
+- C 驱动测试留在 C 侧（设备端 Unity 或主机 gcc），不得写进 `src/**` 的 `#[cfg(test)]` 模块、mock 或 fixture，也不得改写 `tests/zigbee-host/**`；测试 C 组件不是修改 Rust 源码的理由。
+- Rust 业务测试留在 `src/**` 单测或 `tests/**` 宿主测试；mock 的是 `drivers` 门面，不是 C 源码。
+- `tg_*.h` / `platform_bindings.h` 是 ABI 边界。改头必须同时给 Rust `extern "C"` 与门面适配，单独改头导致编译失败不算完成。
+- 一个 PR 只动一侧；跨边界改动显式标注并互审，禁止顺带格式化或重排对方目录。
+- 唯一例外是图标：Rust 侧可为加图标改 `display_canvas.c` 的 `icons[]` 并同步 `src/ui/icon.rs`；越过 `0x8F` 码位时由 C 侧调整 `tests/display_canvas_test.c` 的空白约定，Rust 侧不改该测试。
+
 ## 单一所有者与串行契约
 
 每个 C 组件在固件生命周期内只允许一个 Rust 所有者：

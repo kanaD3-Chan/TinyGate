@@ -1,0 +1,29 @@
+# 责任边界见 DESIGN.md「2026-11-28 Rust / C 责任边界」。
+# 需在 GitHub 分支保护启用 "Require review from Code Owners" 才会强制生效。
+
+# Rust 主线（kanaDE）：业务、门面、构建与 Rust 测试
+/src/                 @kanaD3-Chan
+/Cargo.toml           @kanaD3-Chan
+/Cargo.lock           @kanaD3-Chan
+/build.rs             @kanaD3-Chan
+/.cargo/              @kanaD3-Chan
+/rust-toolchain.toml  @kanaD3-Chan
+/tests/zigbee-host/   @kanaD3-Chan
+
+# C 组件（Reacher）：实现、公开 ABI、C 测试与驱动文档
+/components/              @SivRoua
+# 图标豁免：Rust 侧可为加图标修改 icons[] 表；该文件由双方共同 review（任一方批准即可）
+/components/tg_display/src/display_canvas.c @SivRoua @kanaD3-Chan
+/tests/button_state_test.c  @SivRoua
+/tests/display_canvas_test.c @SivRoua
+/tests/rgb_color_test.c     @SivRoua
+/docs/oled-driver.md        @SivRoua
+/docs/button-driver.md      @SivRoua
+/docs/tf-card-driver.md     @SivRoua
+/docs/connectivity-and-rgb.md @SivRoua
+/docs/onboard-drivers.md    @SivRoua
+
+# 共享契约与设计：跨边界改动需双方确认
+/contracts/           @kanaD3-Chan @SivRoua
+/DESIGN.md            @kanaD3-Chan @SivRoua
+/docs/architecture.md @kanaD3-Chan @SivRoua
