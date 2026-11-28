@@ -1,10 +1,9 @@
 # 无外设板上资源驱动（2026-11-14）
 
 > Wi-Fi 的显式凭据持久化、SoftAP，BLE GATT 和 GPIO8 RGB 已新增；
-> 请以 [通信与 RGB 联调说明](connectivity-and-rgb.md) 为当前接口依据。SD 继续搁置；电源已改为超级电容掉电保持（2026-11-21）。
+> 请以 [通信与 RGB 联调说明](connectivity-and-rgb.md) 为当前接口依据。主线 TF 卡接口见 [TF 卡驱动](tf-card-driver.md)。电源方案为超级电容掉电保持。
 
-> 当前默认固件为双 C6 Zigbee 联调模式。运行本页的 Wi-Fi/BLE/OLED 演示请使用
-> `cargo run --no-default-features`；参见 [Zigbee 联调](zigbee-bringup.md)。
+> 本页的 Wi-Fi/BLE/OLED 示例面向 Demo 固件。网关主线的构建与接入方式见 [Zigbee 联调](zigbee-bringup.md)。
 
 > 2026-11-16：已接入外部 OLED（SDA20/SCL19），显示启动、扫描阶段与运行状态。
 > 下文保留最初无外设版本说明；当前实现与测试见 [OLED 驱动](oled-driver.md)。
@@ -21,7 +20,7 @@ components/
   tg_wifi/{include,src}/            C：Wi-Fi 扫描、STA 连接与状态
   tg_temperature/{include,src}/     C：片内温度
   tg_system/{include,src}/          C：芯片、复位原因、内存、运行时间
-  c_drivers/                       保留的旧外设占位实现，本例不初始化
+  tg_power/{include,src}/          C：超级电容保持接口，板级检测与采样待实现
 src/
   drivers/radio/ble.rs             Rust：BLE 所有权与安全封装
   drivers/radio/ble_ad.rs          Rust：广播名称解析
@@ -144,7 +143,7 @@ cargo run
 | BLE | 原扫描报告、名称、完成与丢弃统计仍可用 |
 
 尚未实现：LED、BOOT、Zigbee 接入、BLE GATT 控制、NVS 业务存储与 USB 命令终端。
-旧 c_drivers 的电源/SD 数据仍是占位值；电源函数已改为 `tg_power_*`，主程序暂不调用。
+主线的 `tg_power` 提供电源保持接口，目前返回占位数据，板级检测与采样待实现。
 
 参考官方接口：
 - https://docs.espressif.com/projects/esp-idf/en/stable/esp32c6/api-reference/network/esp_wifi.html

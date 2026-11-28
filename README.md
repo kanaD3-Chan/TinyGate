@@ -4,7 +4,7 @@ A netgate based on ESP32-C6 supermini board
 - [架构设计](DESIGN.md)
 - [Rust 架构与目录约定](docs/architecture.md)
 - [核心板引脚与当前占用](materials/pinout-and-usage.md)
-- 硬件验证 bench 固件在 `demo` 分支；`main` 为网关产品主线（embassy 双 executor：无线电服务 + 低优先级 UI 任务）
+- `main` 为网关产品主线。硬件联调固件见[历史快照](https://github.com/SivRoua/TinyGate/tree/c3bdc2274f8eb0f3d6e7c7619528029b77e7f36f)。
 - [TF 卡驱动](docs/tf-card-driver.md)
 - [网关、云端与 Web / 微信小程序通信契约](contracts/README.md)
 - [双 C6 Zigbee 构建与联调](docs/zigbee-bringup.md)

@@ -20,7 +20,19 @@ impl Identity {
     /// mint a `boot_id`. A failing NVS degrades to a boot-scoped identity
     /// (counter 1) instead of blocking the firmware.
     pub fn load() -> Identity {
-        let counter = match bump_counter() {
+        Self::from_counter(
+            EspDefaultNvsPartition::take()
+                .map_err(Into::into)
+                .and_then(bump_counter),
+        )
+    }
+
+    pub(crate) fn from_partition(partition: EspDefaultNvsPartition) -> Identity {
+        Self::from_counter(bump_counter(partition))
+    }
+
+    fn from_counter(counter: anyhow::Result<u32>) -> Identity {
+        let counter = match counter {
             Ok(next) => next,
             Err(err) => {
                 warn!("identity NVS unavailable: {err:#}");
@@ -49,8 +61,7 @@ impl Identity {
 
 /// Read-modify-write the persistent boot counter. The default NVS partition
 /// is taken once here (esp-idf-svc's Rust-side guard is single-shot).
-fn bump_counter() -> anyhow::Result<u32> {
-    let partition = EspDefaultNvsPartition::take()?;
+fn bump_counter(partition: EspDefaultNvsPartition) -> anyhow::Result<u32> {
     let nvs = EspNvs::new(partition, NAMESPACE, true)?;
     let next = nvs
         .get_u32(BOOT_COUNTER_KEY)?

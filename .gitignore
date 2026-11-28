@@ -51,6 +51,7 @@ project.private.config.json
 
 # 本机配置与凭据（保留可分享的示例）
 .cargo/config.toml
+!/tests/zigbee-host/.cargo/config.toml
 *.local.toml
 secrets.toml
 wifi_credentials.h

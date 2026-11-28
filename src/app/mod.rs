@@ -3,9 +3,10 @@
 //! This is the only module that decides which capability runs on which
 //! executor. Everything it assembles comes from two sides: product
 //! capabilities in `gateway/` and their hardware adapters in `drivers/`.
-use crate::gateway::{self, bus, identity};
+use crate::gateway::{self, command, identity};
 use crate::ui::{self, Ui};
 use anyhow::Result;
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
 use log::info;
 
 pub mod board;
@@ -21,7 +22,16 @@ pub fn run() -> Result<()> {
 
     // Connection identity per the contracts: persistent boot counter,
     // boot-scoped boot_id, climbing seq.
-    let ident = identity::Identity::load();
+    let ident = match EspDefaultNvsPartition::take() {
+        Ok(partition) => {
+            let ident = identity::Identity::from_partition(partition.clone());
+            if let Err(err) = command::init(partition) {
+                log::warn!("Command journal unavailable: {err:#}");
+            }
+            ident
+        }
+        Err(_) => identity::Identity::load(),
+    };
     info!(
         "Identity: gateway_id={} boot_id={} boot_counter={}",
         ident.gateway_id(),
@@ -43,7 +53,7 @@ pub fn run() -> Result<()> {
             };
             let executor = Box::leak(Box::new(embassy_executor::Executor::new()));
             executor.run(|spawner| {
-                let token = ui::task::ui_task(screen, bus::receiver()).expect("spawn UI task");
+                let token = ui::task::ui_task(screen).expect("spawn UI task");
                 spawner.spawn(token);
             });
         })
@@ -52,8 +62,7 @@ pub fn run() -> Result<()> {
     // Main executor: radio access services, timers and later the uplink.
     let executor = Box::leak(Box::new(embassy_executor::Executor::new()));
     executor.run(|spawner| {
-        let token = gateway::access::zigbee::coordinator_service(bus::sender())
-            .expect("spawn Zigbee service");
+        let token = gateway::access::zigbee::coordinator_service().expect("spawn Zigbee service");
         spawner.spawn(token);
     })
 }

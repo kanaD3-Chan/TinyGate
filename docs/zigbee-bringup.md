@@ -1,5 +1,21 @@
 # 双 C6 Zigbee 联调
 
+下文的 Demo 部分对应[历史联调快照](https://github.com/SivRoua/TinyGate/tree/c3bdc2274f8eb0f3d6e7c7619528029b77e7f36f)。产品主线使用 [Zigbee 接入服务](architecture.md#事件流)，现行 C ABI 以 [tg_zigbee.h](../components/tg_zigbee/include/tg_zigbee.h) 为准。
+
+## 主线接入验证
+
+- C 回调按 SDK 给出的 ZCL 类型复制原始属性，保留端点、Cluster、属性号、制造商代码和协议状态。每事件最多复制 32 字节，超长数据显式标记截断。Rust 产品层仅将指定的标准温度和开关属性映射成业务观测。
+- 主线先读属性，再尝试 Bind 与 Configure Reporting，收到匹配的配置回执后进入订阅状态。绑定或配置失败时每 60 秒尝试读回。静默超时按三倍配置周期处理，设备标识从 EUI‑64 派生。
+- 在 Linux 开发机用宿主 Rust 测试跑模拟双节点、乱序回执、命令日志恢复和独立事件消费。
+
+  ```sh
+  cd tests/zigbee-host
+  cargo test
+  ```
+
+- 寻址表暂时缺失时，主线在命令有效期内发起 IEEE 地址查询。收到匹配的目标后才重新尝试发出开关命令。已知路由冲突按设备离线处理，设备协议负回执才判为设备拒绝。Bind 回执带回短地址、IEEE、端点和 Cluster，Rust 与请求 ID 一并核对。
+- 硬件验收使用两个可独立控制的节点，检查读回确认、迟到回执及换短地址。再选择一个依赖绑定才上报的节点，核对 Bind 与配置回执，并观察其实际报告。配套 Demo 节点的定向主动上报无法覆盖这项验证。
+
 ## 两个独立工程
 
 - 当前仓库：Rust TinyGate + C `components/tg_zigbee`，协调器，OLED SDA20/SCL19。
@@ -84,10 +100,6 @@ cargo build
 # 明确选择网关串口后烧录，模板 runner 也提供等效 cargo run
 espflash flash --port COM_GATEWAY --monitor --partition-table partitions.csv target/riscv32imac-esp-espidf/debug/tiny-gate
 
-# 原板上 Wi-Fi/BLE/OLED 演示仍可构建与运行
-cargo build --no-default-features
-cargo run --no-default-features
-
 # 副板，在已激活 ESP-IDF v6.1 的终端
 cd ../TinyGate-ZigbeeNode
 idf.py build
@@ -98,15 +110,9 @@ idf.py -p COM_NODE flash monitor
 副板目录的 build.ps1 仅为本机已安装 C6 工具提供便利构建入口，不负责下载 SDK、烧录或擦除。
 两板应分别使用各自构建产物，不要将网关和节点固件烧反。
 
-## 验收记录
+## Demo 实物验收
 
-```powershell
-rustc --test src/drivers/radio/zigbee_check.rs -o target/zigbee-check-tests.exe
-./target/zigbee-check-tests.exe
-```
-
-主机测试覆盖“发送成功不足以通过”、回调顺序、错误事务、错误目标状态及协议失败。
-还必须进行以下实物验证，本次代码构建不代替射频测试：
+配套 Demo 固件的实物验收见下表。主线的宿主测试和实物验收要求见[主线接入验证](#主线接入验证)。
 
 | 场景 | 预期 |
 | --- | --- |

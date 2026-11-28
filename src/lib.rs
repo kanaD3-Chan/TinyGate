@@ -8,7 +8,7 @@
 //!   and (in later milestones) uplink, rules and offline storage.
 //! - `ui/` is the only screen writer.
 //!
-//! Benches and validation apps live on the `demo` branch.
+//! Hardware validation firmware is linked from the README.
 pub mod app;
 pub mod drivers;
 pub mod gateway;
